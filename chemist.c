@@ -320,7 +320,8 @@ void generate_code(Node* node)
     {
         if (current->type == NODE_FUNCTION)
         {
-            if (!current->func_name) {
+            if (!current->func_name)
+            {
                 fprintf(stderr, "Error: Function name is null\n");
                 exit(1);
             }
@@ -346,6 +347,38 @@ void generate_code(Node* node)
                 if (stmt->type == NODE_VAR_DECL)
                 {
                     add_variable(stmt->var_name);
+
+                    // Handle initialization if present
+                    if (stmt->right)
+                    {
+                        int offset = get_variable_offset(stmt->var_name);
+                        if (stmt->right->type == NODE_NUMBER)
+                        {
+                            fprintf(output, "    mov rax, %d\n", stmt->right->value);
+                            fprintf(output, "    mov [rbp - %d], rax\n", offset);
+                        }
+                        else if (stmt->right->type == NODE_VAR_REF)
+                        {
+                            int right_offset = get_variable_offset(stmt->right->var_name);
+                            fprintf(output, "    mov rax, [rbp - %d]\n", right_offset);
+                            fprintf(output, "    mov [rbp - %d], rax\n", offset);
+                        }
+                        else if (stmt->right->type == NODE_CALL)
+                        {
+                            if (!stmt->right->func_name)
+                            {
+                                fprintf(stderr, "Error: Function call name is null in initialization\n");
+                                exit(1);
+                            }
+                            fprintf(output, "    call %s\n", stmt->right->func_name);
+                            fprintf(output, "    mov [rbp - %d], rax\n", offset);
+                        }
+                        else
+                        {
+                            fprintf(stderr, "Error: Invalid initialization expression type %d\n", stmt->right->type);
+                            exit(1);
+                        }
+                    }
                 }
                 stmt = stmt->next;
             }
@@ -375,7 +408,7 @@ void generate_code(Node* node)
                             fprintf(stderr, "Error: Function call name is null in return\n");
                             exit(1);
                         }
-                        fprintf(output, "   call %s\n", stmt->left->func_name);
+                        fprintf(output, "    call %s\n", stmt->left->func_name);
                     }
                     else if (stmt->left->type == NODE_VAR_REF)
                     {
@@ -401,7 +434,7 @@ void generate_code(Node* node)
                         fprintf(stderr, "Error: Function call name is null\n");
                         exit(1);
                     }
-                    fprintf(output, "   call %s\n", stmt->func_name);
+                    fprintf(output, "    call %s\n", stmt->func_name);
                 }
                 else if (stmt->type == NODE_VAR_ASSIGN)
                 {
@@ -616,7 +649,8 @@ Node* parse_return()
 Node* parse_call()
 {
     Node* node = (Node*)malloc(sizeof(Node));
-    if (!node) {
+    if (!node)
+    {
         fprintf(stderr, "Error: Memory allocation failed for call node\n");
         exit(1);
     }
@@ -624,12 +658,14 @@ Node* parse_call()
     node->next = NULL;
     node->left = NULL;
     node->right = NULL;
-    if (tokens[token_pos].type != TOK_IDENTIFIER) {
+    if (tokens[token_pos].type != TOK_IDENTIFIER)
+    {
         fprintf(stderr, "Error: Expected identifier for function call at position %zu\n", token_pos);
         exit(1);
     }
     node->func_name = strdup(tokens[token_pos].value);
-    if (!node->func_name) {
+    if (!node->func_name)
+    {
         fprintf(stderr, "Error: Memory allocation failed for function name\n");
         exit(1);
     }
@@ -673,6 +709,34 @@ Node* parse_var_decl()
     }
     node->var_name = strdup(tokens[token_pos].value);
     expect(TOK_IDENTIFIER);
+
+    // Handle optional initialization
+    if (token_pos < token_count && tokens[token_pos].type == TOK_EQUAL)
+    {
+        expect(TOK_EQUAL);
+        if (tokens[token_pos].type == TOK_NUMBER)
+        {
+            node->right = parse_number();
+        }
+        else if (tokens[token_pos].type == TOK_IDENTIFIER)
+        {
+            if (token_pos < token_count && tokens[token_pos].type == TOK_IDENTIFIER &&
+                token_pos + 1 < token_count && tokens[token_pos + 1].type == TOK_LPAREN)
+            {
+                node->right = parse_call();
+            }
+            else
+            {
+                node->right = parse_var_ref();
+            }
+        }
+        else
+        {
+            fprintf(stderr, "Error: Expected number, variable or function call at position %zu\n", token_pos);
+            exit(1);
+        }
+    }
+
     return node;
 }
 
