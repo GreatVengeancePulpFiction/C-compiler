@@ -6,7 +6,7 @@
 // Token types
 enum TokenType
 {
-    TOK_INT, TOK_MAIN, TOK_RETURN, TOK_NUMBER, TOK_SEMICOLON,
+    TOK_INT, TOK_IDENTIFIER, TOK_RETURN, TOK_NUMBER, TOK_SEMICOLON,
     TOK_LBRACE, TOK_RBRACE, TOK_LPAREN, TOK_RPAREN, TOK_EOF, TOK_UNKNOWN
 };
 
@@ -20,15 +20,18 @@ typedef struct Token
 // Node types for AST
 enum NodeType
 {
-    NODE_RETURN, NODE_NUMBER
+    NODE_PROGRAM, NODE_FUNCTION, NODE_RETURN, NODE_NUMBER
 };
 
 // AST node structure
 typedef struct Node
 {
     enum NodeType type;
-    int value;
-    struct Node* left;
+    char* func_name;    // For function nodes
+    int value;          // For number nodes
+    struct Node* body;  // For function nodes
+    struct Node* left;  // For return nodes
+    struct Node* next;  // For program node to link functions
 } Node;
 
 // Global variables
@@ -47,7 +50,8 @@ void tokenize();
 void generate_code(Node* node);
 void expect(enum TokenType type);
 void free_ast(Node *node);
-Node* parse_main();
+Node* parse_program();
+Node* parse_function();
 Node* parse_return();
 Node* parse_number();
 Token next_token();
@@ -79,7 +83,7 @@ void compile(const char* input_file, const char* output_file)
     read_input(input_file);
     tokenize();
     token_pos = 0;
-    Node* ast = parse_main();
+    Node* ast = parse_program();
 
     output = fopen(output_file, "w");
     if (!output)
@@ -152,15 +156,23 @@ Token next_token()
         token.type = TOK_INT;
         pos += 3;
     }
-    else if (strncmp(&input[pos], "main", 4) == 0 && !isalnum(input[pos + 4]))
-    {
-        token.type = TOK_MAIN;
-        pos += 4;
-    }
     else if (strncmp(&input[pos], "return", 6) == 0 && !isalnum(input[pos + 6]))
     {
         token.type = TOK_RETURN;
         pos += 6;
+    }
+    else if (isalpha(input[pos]))
+    {
+        char* start = &input[pos];
+        while (isalnum(input[pos]))
+        {
+            pos++;
+        }
+        size_t len = &input[pos] - start;
+        token.type = TOK_IDENTIFIER;
+        token.value = malloc(len + 1);
+        strncpy(token.value, start, len);
+        token.value[len] = '\0';
     }
     else if (isdigit(input[pos]))
     {
@@ -211,18 +223,35 @@ Token next_token()
 void generate_code(Node* node)
 {
     fprintf(output, "format ELF64 executable 3\n");
-    fprintf(output, "entry main\n");
+    fprintf(output, "entry start\n");
     fprintf(output, "segment readable executable\n");
-    fprintf(output, "main:\n");
 
-    if (node->type == NODE_RETURN)
+    // Generate code for all functions
+    Node* current = node;
+    while (current)
     {
-        fprintf(output, "    mov rax, %d\n", node->left->value);
-        fprintf(output, "    mov rdi, rax\n");
-        fprintf(output, "    mov rax, 60\n"); // sys_exit
-        fprintf(output, "    syscall\n");
+        if (current->type == NODE_FUNCTION)
+        {
+            fprintf(output, "%s:\n", current->func_name);
+            fprintf(output, "   push rbp\n");
+            fprintf(output, "   mov rbp, rsp\n");
+
+            if (current->body && current->body->type == NODE_RETURN)
+            {
+                fprintf(output, "   mov rax, %d\n", current->body->left->value);
+                fprintf(output, "   pop rbp\n");
+                fprintf(output, "   ret\n\n");
+            }
+        }
+        current = current->next;
     }
-    
+
+    fprintf(output, "start:\n");
+    fprintf(output, "   call main\n");
+    fprintf(output, "   mov rdi, rax\n");
+    fprintf(output, "   mov rax, 60\n"); // sys_exit
+    fprintf(output, "   syscall\n");
+
     fprintf(output, "segment readable writable\n");
 }
 
@@ -236,22 +265,50 @@ void expect(enum TokenType type)
     token_pos++;
 }
 
-Node* parse_main()
+Node* parse_program()
+{
+    Node* program = (Node*)malloc(sizeof(Node));
+    program->type = NODE_PROGRAM;
+    program->next = NULL;
+    Node* current = program;
+
+    while (token_pos < token_count && tokens[token_pos].type != TOK_EOF)
+    {
+        Node* func = parse_function();
+        current->next = func;
+        current = func;
+    }
+    return program;
+}
+
+Node * parse_function()
 {
     expect(TOK_INT);
-    expect(TOK_MAIN);
+    Node* node = (Node*)malloc(sizeof(Node));
+    node->type = NODE_FUNCTION;
+    node->next = NULL;
+
+    if (tokens[token_pos].type != TOK_IDENTIFIER)
+    {
+        fprintf(stderr, "Error: Expected function name at position %zu\n", token_pos);
+        exit(1);
+    }
+    node->func_name = strdup(tokens[token_pos].value);
+    expect(TOK_IDENTIFIER);
+
     expect(TOK_LPAREN);
-    expect(TOK_RPAREN);
+    expect(TOK_RPAREN); // For now, supporting functions without parameters
     expect(TOK_LBRACE);
-    Node* node = parse_return();
+    node->body = parse_return();
     expect(TOK_RBRACE);
+
     return node;
 }
 
 Node* parse_return()
 {
     expect(TOK_RETURN);
-    Node* node = malloc(sizeof(Node));
+    Node* node = (Node*)malloc(sizeof(Node));
     node->type = NODE_RETURN;
     node->left = parse_number();
     expect(TOK_SEMICOLON);
@@ -260,7 +317,7 @@ Node* parse_return()
 
 Node* parse_number()
 {
-    Node* node = malloc(sizeof(Node));
+    Node* node = (Node*)malloc(sizeof(Node));
     node->type = NODE_NUMBER;
     node->value = atoi(tokens[token_pos].value);
     node->left = NULL;
@@ -271,6 +328,19 @@ Node* parse_number()
 void free_ast(Node *node)
 {
     if (!node) return;
-    free_ast(node->left);
+
+    if (node->type == NODE_PROGRAM || node->type == NODE_FUNCTION)
+    {
+        free_ast(node->next);
+        if (node->type == NODE_FUNCTION)
+        {
+            free(node->func_name);
+            free_ast(node->body);
+        }
+    }
+    else
+    {
+        free_ast(node->left);
+    }
     free(node);
 }

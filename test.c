@@ -1,4 +1,7 @@
-int main()
-{
-    return 69;
+int func() {
+    return 0;
+}
+
+int main() {
+    return func();
 }
