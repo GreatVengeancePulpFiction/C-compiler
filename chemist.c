@@ -7,7 +7,7 @@
 enum TokenType
 {
     TOK_INT, TOK_IDENTIFIER, TOK_RETURN, TOK_NUMBER, TOK_SEMICOLON,
-    TOK_LBRACE, TOK_RBRACE, TOK_LPAREN, TOK_RPAREN, TOK_EOF, TOK_UNKNOWN
+    TOK_LBRACE, TOK_RBRACE, TOK_LPAREN, TOK_RPAREN, TOK_EQUAL, TOK_EOF, TOK_UNKNOWN
 };
 
 // Token structure
@@ -20,17 +20,34 @@ typedef struct Token
 // Node types for AST
 enum NodeType
 {
-    NODE_PROGRAM, NODE_FUNCTION, NODE_CALL, NODE_STMT_LIST, NODE_RETURN, NODE_NUMBER
+    NODE_PROGRAM, NODE_FUNCTION, NODE_CALL, NODE_STMT_LIST, NODE_RETURN,
+    NODE_NUMBER, NODE_VAR_DECL, NODE_VAR_ASSIGN, NODE_VAR_REF
 };
+
+// Symbol table entry
+typedef struct Symbol
+{
+    char* name;
+    int stack_offset; // Offset from rbp (in bytes)
+} Symbol;
+
+typedef struct Scope
+{
+    Symbol* symbols;
+    size_t symbol_count;
+    int stack_size; // Total stack size for variables
+} Scope;
 
 // AST node structure
 typedef struct Node
 {
     enum NodeType type;
     char* func_name;    // For function nodes
+    char* var_name;     // For variable nodes
     int value;          // For number nodes
     struct Node* body;  // For function nodes
     struct Node* left;  // For return nodes
+    struct Node* right; // For assign nodes
     struct Node* next;  // For program node to link functions
 } Node;
 
@@ -42,6 +59,7 @@ Token* tokens;          // Array of tokens
 size_t token_count;
 size_t token_pos;       // Current token position
 FILE* output;           // Output assembly file
+Scope* current_scope;
 
 // Function signatures
 void compile(const char* input_file, const char* output_file);
@@ -57,7 +75,14 @@ Node* parse_stmt();
 Node* parse_call();
 Node* parse_return();
 Node* parse_number();
+Node* parse_var_decl();
+Node* parse_var_assign();
+Node* parse_var_ref();
 Token next_token();
+void init_scope();
+void free_scope();
+void add_variable(const char* name);
+int get_variable_offset(const char* name);
 
 int main(int argc, char** argv)
 {
@@ -95,6 +120,8 @@ void compile(const char* input_file, const char* output_file)
         exit(1);
     }
 
+    // Initialize current_scope before generating code
+    current_scope = NULL;
     generate_code(ast);
     fclose(output);
 
@@ -215,6 +242,11 @@ Token next_token()
         token.type = TOK_RPAREN;
         pos++;
     }
+    else if (input[pos] == '=')
+    {
+        token.type = TOK_EQUAL;
+        pos++;
+    }
     else
     {
         token.type = TOK_UNKNOWN;
@@ -223,11 +255,64 @@ Token next_token()
     return token;
 }
 
+void init_scope()
+{
+    current_scope = (Scope*)malloc(sizeof(Scope));
+    current_scope->symbols = NULL;
+    current_scope->symbol_count = 0;
+    current_scope->stack_size = 0;
+}
+
+void free_scope()
+{
+    for (size_t i = 0; i < current_scope->symbol_count; i++)
+    {
+        free(current_scope->symbols[i].name);
+    }
+    free(current_scope->symbols);
+    free(current_scope);
+}
+
+void add_variable(const char* name)
+{
+    // Check for duplicate variable
+    for (size_t i = 0; i < current_scope->symbol_count; i++)
+    {
+        if (strcmp(current_scope->symbols[i].name, name) == 0)
+        {
+            fprintf(stderr, "Error: Variable %s already exists\n", name);
+            exit(1);
+        }
+    }
+
+    current_scope->symbol_count++;
+    current_scope->symbols = (Symbol*)realloc(current_scope->symbols, current_scope->symbol_count * sizeof(Symbol));
+    current_scope->symbols[current_scope->symbol_count - 1].name = strdup(name);
+    current_scope->stack_size += 8; // 8 bytes for int
+    current_scope->symbols[current_scope->symbol_count - 1].stack_offset = -current_scope->stack_size;
+}
+
+int get_variable_offset(const char* name)
+{
+    for (size_t i = 0; i < current_scope->symbol_count; i++)
+    {
+        if (strcmp(current_scope->symbols[i].name, name) == 0)
+        {
+            return current_scope->symbols[i].stack_offset;
+        }
+    }
+    fprintf(stderr, "Error: Undefined variable %s\n", name);
+    exit(1);
+}
+
 void generate_code(Node* node)
 {
     fprintf(output, "format ELF64 executable 3\n");
     fprintf(output, "entry start\n");
     fprintf(output, "segment readable executable\n");
+
+    // Initialize scope once
+    init_scope();
 
     // Generate code for all functions
     Node* current = node->next; // Skip PROGRAM node
@@ -243,8 +328,34 @@ void generate_code(Node* node)
             fprintf(output, "    push rbp\n");
             fprintf(output, "    mov rbp, rsp\n");
 
-            // Generate code for function body statements
+            // Reset stack_size for each function
+            current_scope->stack_size = 0;
+            // Clear previous symbols for the new function scope
+            for (size_t i = 0; i < current_scope->symbol_count; i++)
+            {
+                free(current_scope->symbols[i].name);
+            }
+            free(current_scope->symbols);
+            current_scope->symbols = NULL;
+            current_scope->symbol_count = 0;
+
+            // Allocate stack space for variables
             Node* stmt = current->body;
+            while (stmt)
+            {
+                if (stmt->type == NODE_VAR_DECL)
+                {
+                    add_variable(stmt->var_name);
+                }
+                stmt = stmt->next;
+            }
+            if (current_scope->stack_size > 0)
+            {
+                fprintf(output, "    sub rsp, %d\n", current_scope->stack_size);
+            }
+
+            // Generate code for function body statements
+            stmt = current->body;
             while (stmt)
             {
                 if (stmt->type == NODE_RETURN)
@@ -259,32 +370,68 @@ void generate_code(Node* node)
                     }
                     else if (stmt->left->type == NODE_CALL)
                     {
-                        if (!stmt->left->func_name) {
+                        if (!stmt->left->func_name)
+                        {
                             fprintf(stderr, "Error: Function call name is null in return\n");
                             exit(1);
                         }
                         fprintf(output, "    call %s\n", stmt->left->func_name);
+                    }
+                    else if (stmt->left->type == NODE_VAR_REF)
+                    {
+                        int offset = get_variable_offset(stmt->left->var_name);
+                        fprintf(output, "    mov rax, [rbp + %d]\n", offset);
                     }
                     else
                     {
                         fprintf(stderr, "Error: Invalid return expression type %d\n", stmt->left->type);
                         exit(1);
                     }
+                    if (current_scope->stack_size > 0)
+                    {
+                        fprintf(output, "    mov rsp, rbp\n");
+                    }
                     fprintf(output, "    pop rbp\n");
                     fprintf(output, "    ret\n\n");
                 }
                 else if (stmt->type == NODE_CALL)
                 {
-                    if (!stmt->func_name) {
+                    if (!stmt->func_name)
+                    {
                         fprintf(stderr, "Error: Function call name is null\n");
                         exit(1);
                     }
                     fprintf(output, "    call %s\n", stmt->func_name);
                 }
-                else
+                else if (stmt->type == NODE_VAR_ASSIGN)
                 {
-                    fprintf(stderr, "Error: Invalid statement type %d\n", stmt->type);
-                    exit(1);
+                    int offset = get_variable_offset(stmt->var_name);
+                    if (stmt->right->type == NODE_NUMBER)
+                    {
+                        fprintf(output, "    mov rax, %d\n", stmt->right->value);
+                        fprintf(output, "    mov [rbp + %d], rax\n", offset);
+                    }
+                    else if (stmt->right->type == NODE_VAR_REF)
+                    {
+                        int right_offset = get_variable_offset(stmt->right->var_name);
+                        fprintf(output, "    mov rax, [rbp + %d]\n", right_offset);
+                        fprintf(output, "    mov [rbp + %d], rax\n", offset);
+                    }
+                    else if (stmt->right->type == NODE_CALL)
+                    {
+                        if (!stmt->right->func_name)
+                        {
+                            fprintf(stderr, "Error: Function call name is null in assignment\n");
+                            exit(1);
+                        }
+                        fprintf(output, "   call %s\n", stmt->right->func_name);
+                        fprintf(output, "   mov [rbp + %d], rax\n", offset);
+                    }
+                    else
+                    {
+                        fprintf(stderr, "Error: Invalid assignment expression type %d\n", stmt->right->type);
+                        exit(1);
+                    }
                 }
                 stmt = stmt->next;
             }
@@ -299,6 +446,9 @@ void generate_code(Node* node)
     fprintf(output, "    syscall\n");
 
     fprintf(output, "segment readable writable\n");
+
+    // Free scope once at the end
+    free_scope();
 }
 
 void expect(enum TokenType type)
@@ -364,6 +514,7 @@ Node* parse_stmt_list()
     list->left = NULL;
     list->body = NULL;
     list->func_name = NULL;
+    list->var_name = NULL;
 
     Node* current = list;
     Node* prev = NULL;
@@ -405,9 +556,21 @@ Node* parse_stmt()
     {
         stmt = parse_return();
     }
+    else if (tokens[token_pos].type == TOK_INT)
+    {
+        stmt = parse_var_decl();
+    }
     else if (tokens[token_pos].type == TOK_IDENTIFIER)
     {
-        stmt = parse_call();
+        // Peek ahead to distinguish assignment from function call
+        if (token_pos + 1 < token_count && tokens[token_pos + 1].type == TOK_EQUAL)
+        {
+            stmt = parse_var_assign();
+        }
+        else
+        {
+            stmt = parse_call();
+        }
     }
     else
     {
@@ -432,11 +595,19 @@ Node* parse_return()
     }
     else if (tokens[token_pos].type == TOK_IDENTIFIER)
     {
-        node->left = parse_call();
+        if (token_pos < token_count && tokens[token_pos].type == TOK_IDENTIFIER &&
+            token_pos + 1 < token_count && tokens[token_pos + 1].type == TOK_LPAREN)
+        {
+            node->left = parse_call();
+        }
+        else
+        {
+            node->left = parse_var_ref();
+        }
     }
     else
     {
-        fprintf(stderr, "Error: Expected number or function call at position %zu\n", token_pos);
+        fprintf(stderr, "Error: Expected number, variable or function call at position %zu\n", token_pos);
         exit(1);
     }
     return node;
@@ -452,6 +623,7 @@ Node* parse_call()
     node->type = NODE_CALL;
     node->next = NULL;
     node->left = NULL;
+    node->right = NULL;
     if (tokens[token_pos].type != TOK_IDENTIFIER) {
         fprintf(stderr, "Error: Expected identifier for function call at position %zu\n", token_pos);
         exit(1);
@@ -474,8 +646,102 @@ Node* parse_number()
     node->type = NODE_NUMBER;
     node->value = atoi(tokens[token_pos].value);
     node->left = NULL;
+    node->right = NULL;
     node->next = NULL;
     expect(TOK_NUMBER);
+    return node;
+}
+
+Node* parse_var_decl()
+{
+    expect(TOK_INT);
+    Node* node = (Node*)malloc(sizeof(Node));
+    if (!node)
+    {
+        fprintf(stderr, "Error: Memory allocation failed for variable declaration\n");
+        exit(1);
+    }
+    node->type = NODE_VAR_DECL;
+    node->next = NULL;
+    node->left = NULL;
+    node->right = NULL;
+
+    if (tokens[token_pos].type != TOK_IDENTIFIER)
+    {
+        fprintf(stderr, "Error: Expected variable name at position %zu\n", token_pos);
+        exit(1);
+    }
+    node->var_name = strdup(tokens[token_pos].value);
+    expect(TOK_IDENTIFIER);
+    return node;
+}
+
+Node* parse_var_assign()
+{
+    Node* node = (Node*)malloc(sizeof(Node));
+    if (!node)
+    {
+        fprintf(stderr, "Error: Memory allocation failed for variable assignment\n");
+        exit(1);
+    }
+    node->type = NODE_VAR_ASSIGN;
+    node->next = NULL;
+    node->left = NULL;
+
+    if (tokens[token_pos].type != TOK_IDENTIFIER)
+    {
+        fprintf(stderr, "Error: Expected variable name at position %zu\n", token_pos);
+        exit(1);
+    }
+    node->var_name = strdup(tokens[token_pos].value);
+    expect(TOK_IDENTIFIER);
+    expect(TOK_EQUAL);
+
+    if (tokens[token_pos].type == TOK_NUMBER)
+    {
+        node->right = parse_number();
+    }
+    else if (tokens[token_pos].type == TOK_IDENTIFIER)
+    {
+        // Peek ahead to distinguish variable reference from function call
+        if (token_pos < token_count && tokens[token_pos].type == TOK_IDENTIFIER &&
+            token_pos + 1 < token_count && tokens[token_pos + 1].type == TOK_LPAREN)
+        {
+            node->right = parse_call();
+        }
+        else
+        {
+            node->right = parse_var_ref();
+        }
+    }
+    else
+    {
+        fprintf(stderr, "Error: Expected number, variable or function call at position %zu\n", token_pos);
+        exit(1);
+    }
+    return node;
+}
+
+Node* parse_var_ref()
+{
+    Node* node = (Node*)malloc(sizeof(Node));
+    if (!node)
+    {
+        fprintf(stderr, "Error: Memory allocation failed for variable reference\n");
+        exit(1);
+    }
+    node->type = NODE_VAR_REF;
+    node->next = NULL;
+    node->left = NULL;
+    node->right = NULL;
+
+    if (tokens[token_pos].type != TOK_IDENTIFIER)
+    {
+        fprintf(stderr, "Error: Expected variable name at position %zu\n", token_pos);
+        exit(1);
+    }
+    node->var_name = strdup(tokens[token_pos].value);
+    expect(TOK_IDENTIFIER);;
     return node;
 }
 
@@ -499,9 +765,27 @@ void free_ast(Node* node)
     }
     else if (node->type == NODE_CALL)
     {
-        if (node->func_name) {
+        if (node->func_name)
+        {
             free(node->func_name);
         }
+        free_ast(node->next);
+    }
+    else if (node->type == NODE_VAR_DECL || node->type == NODE_VAR_REF)
+    {
+        if (node->var_name)
+        {
+            free(node->var_name);
+        }
+        free(node->next);
+    }
+    else if (node->type == NODE_VAR_ASSIGN)
+    {
+        if (node->var_name)
+        {
+            free(node->var_name);
+        }
+        free_ast(node->right);
         free_ast(node->next);
     }
     free(node);

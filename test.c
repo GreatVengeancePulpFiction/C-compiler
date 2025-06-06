@@ -1,8 +1,9 @@
 int func() {
-    return 0;
+    return 42;
 }
 
 int main() {
-    func();
-    return func();
+    int x;
+    x = func();
+    return x;
 }
