@@ -3,5 +3,6 @@ int func() {
 }
 
 int main() {
+    func();
     return func();
 }

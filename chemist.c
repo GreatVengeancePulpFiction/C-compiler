@@ -20,7 +20,7 @@ typedef struct Token
 // Node types for AST
 enum NodeType
 {
-    NODE_PROGRAM, NODE_FUNCTION, NODE_RETURN, NODE_NUMBER
+    NODE_PROGRAM, NODE_FUNCTION, NODE_CALL, NODE_STMT_LIST, NODE_RETURN, NODE_NUMBER
 };
 
 // AST node structure
@@ -39,7 +39,7 @@ char* input;            // Input C code
 size_t input_size;
 size_t pos;             // Current position in input
 Token* tokens;          // Array of tokens
-size_t token_count;     
+size_t token_count;
 size_t token_pos;       // Current token position
 FILE* output;           // Output assembly file
 
@@ -52,6 +52,9 @@ void expect(enum TokenType type);
 void free_ast(Node *node);
 Node* parse_program();
 Node* parse_function();
+Node* parse_stmt_list();
+Node* parse_stmt();
+Node* parse_call();
 Node* parse_return();
 Node* parse_number();
 Token next_token();
@@ -227,30 +230,73 @@ void generate_code(Node* node)
     fprintf(output, "segment readable executable\n");
 
     // Generate code for all functions
-    Node* current = node;
+    Node* current = node->next; // Skip PROGRAM node
     while (current)
     {
         if (current->type == NODE_FUNCTION)
         {
+            if (!current->func_name) {
+                fprintf(stderr, "Error: Function name is null\n");
+                exit(1);
+            }
             fprintf(output, "%s:\n", current->func_name);
-            fprintf(output, "   push rbp\n");
-            fprintf(output, "   mov rbp, rsp\n");
+            fprintf(output, "    push rbp\n");
+            fprintf(output, "    mov rbp, rsp\n");
 
-            if (current->body && current->body->type == NODE_RETURN)
+            // Generate code for function body statements
+            Node* stmt = current->body;
+            while (stmt)
             {
-                fprintf(output, "   mov rax, %d\n", current->body->left->value);
-                fprintf(output, "   pop rbp\n");
-                fprintf(output, "   ret\n\n");
+                if (stmt->type == NODE_RETURN)
+                {
+                    if (!stmt->left) {
+                        fprintf(stderr, "Error: Return statement has no expression\n");
+                        exit(1);
+                    }
+                    if (stmt->left->type == NODE_NUMBER)
+                    {
+                        fprintf(output, "    mov rax, %d\n", stmt->left->value);
+                    }
+                    else if (stmt->left->type == NODE_CALL)
+                    {
+                        if (!stmt->left->func_name) {
+                            fprintf(stderr, "Error: Function call name is null in return\n");
+                            exit(1);
+                        }
+                        fprintf(output, "    call %s\n", stmt->left->func_name);
+                    }
+                    else
+                    {
+                        fprintf(stderr, "Error: Invalid return expression type %d\n", stmt->left->type);
+                        exit(1);
+                    }
+                    fprintf(output, "    pop rbp\n");
+                    fprintf(output, "    ret\n\n");
+                }
+                else if (stmt->type == NODE_CALL)
+                {
+                    if (!stmt->func_name) {
+                        fprintf(stderr, "Error: Function call name is null\n");
+                        exit(1);
+                    }
+                    fprintf(output, "    call %s\n", stmt->func_name);
+                }
+                else
+                {
+                    fprintf(stderr, "Error: Invalid statement type %d\n", stmt->type);
+                    exit(1);
+                }
+                stmt = stmt->next;
             }
         }
         current = current->next;
     }
 
     fprintf(output, "start:\n");
-    fprintf(output, "   call main\n");
-    fprintf(output, "   mov rdi, rax\n");
-    fprintf(output, "   mov rax, 60\n"); // sys_exit
-    fprintf(output, "   syscall\n");
+    fprintf(output, "    call main\n");
+    fprintf(output, "    mov rdi, rax\n");
+    fprintf(output, "    mov rax, 60\n"); // sys_exit
+    fprintf(output, "    syscall\n");
 
     fprintf(output, "segment readable writable\n");
 }
@@ -281,7 +327,7 @@ Node* parse_program()
     return program;
 }
 
-Node * parse_function()
+Node* parse_function()
 {
     expect(TOK_INT);
     Node* node = (Node*)malloc(sizeof(Node));
@@ -299,33 +345,141 @@ Node * parse_function()
     expect(TOK_LPAREN);
     expect(TOK_RPAREN); // For now, supporting functions without parameters
     expect(TOK_LBRACE);
-    node->body = parse_return();
+    node->body = parse_stmt_list();
     expect(TOK_RBRACE);
 
     return node;
 }
+
+Node* parse_stmt_list()
+{
+    Node* list = (Node*)malloc(sizeof(Node));
+    if (!list)
+    {
+        fprintf(stderr, "Error: Memory allocation failed for statement list\n");
+        exit(1);
+    }
+    list->type = NODE_STMT_LIST;
+    list->next = NULL;
+    list->left = NULL;
+    list->body = NULL;
+    list->func_name = NULL;
+
+    Node* current = list;
+    Node* prev = NULL;
+
+    while (token_pos < token_count && tokens[token_pos].type != TOK_RBRACE)
+    {
+        Node* stmt = parse_stmt();
+        if (!stmt)
+        {
+            fprintf(stderr, "Error: Failed to parse statement at position %zu\n", token_pos);
+            exit(1);
+        }
+        if (prev)
+        {
+            prev->next = stmt;
+        }
+        else
+        {
+            list->next = stmt;
+        }
+        prev = stmt;
+    }
+
+    Node* result = list->next;
+    free(list); // Free the dummy list node
+    return result;
+}
+
+Node* parse_stmt()
+{
+    if (token_pos >= token_count)
+    {
+        fprintf(stderr, "Error: Unexpected end of input at position %zu\n", token_pos);
+        exit(1);
+    }
+
+    Node* stmt;
+    if (tokens[token_pos].type == TOK_RETURN)
+    {
+        stmt = parse_return();
+    }
+    else if (tokens[token_pos].type == TOK_IDENTIFIER)
+    {
+        stmt = parse_call();
+    }
+    else
+    {
+        fprintf(stderr, "Error: Expected statement at position %zu, got token type %d\n", token_pos, tokens[token_pos].type);
+        exit(1);
+    }
+    expect(TOK_SEMICOLON);
+    return stmt;
+}
+
 
 Node* parse_return()
 {
     expect(TOK_RETURN);
     Node* node = (Node*)malloc(sizeof(Node));
     node->type = NODE_RETURN;
-    node->left = parse_number();
-    expect(TOK_SEMICOLON);
+    node->next = NULL;
+
+    if (tokens[token_pos].type == TOK_NUMBER)
+    {
+        node->left = parse_number();
+    }
+    else if (tokens[token_pos].type == TOK_IDENTIFIER)
+    {
+        node->left = parse_call();
+    }
+    else
+    {
+        fprintf(stderr, "Error: Expected number or function call at position %zu\n", token_pos);
+        exit(1);
+    }
+    return node;
+}
+
+Node* parse_call()
+{
+    Node* node = (Node*)malloc(sizeof(Node));
+    if (!node) {
+        fprintf(stderr, "Error: Memory allocation failed for call node\n");
+        exit(1);
+    }
+    node->type = NODE_CALL;
+    node->next = NULL;
+    node->left = NULL;
+    if (tokens[token_pos].type != TOK_IDENTIFIER) {
+        fprintf(stderr, "Error: Expected identifier for function call at position %zu\n", token_pos);
+        exit(1);
+    }
+    node->func_name = strdup(tokens[token_pos].value);
+    if (!node->func_name) {
+        fprintf(stderr, "Error: Memory allocation failed for function name\n");
+        exit(1);
+    }
+    expect(TOK_IDENTIFIER);
+    expect(TOK_LPAREN);
+    expect(TOK_RPAREN); // Supporting parameterless call only
+
     return node;
 }
 
 Node* parse_number()
 {
-    Node* node = (Node*)malloc(sizeof(Node));
+    Node* node = malloc(sizeof(Node));
     node->type = NODE_NUMBER;
     node->value = atoi(tokens[token_pos].value);
     node->left = NULL;
+    node->next = NULL;
     expect(TOK_NUMBER);
     return node;
 }
 
-void free_ast(Node *node)
+void free_ast(Node* node)
 {
     if (!node) return;
 
@@ -338,9 +492,17 @@ void free_ast(Node *node)
             free_ast(node->body);
         }
     }
-    else
+    else if (node->type == NODE_RETURN)
     {
         free_ast(node->left);
+        free_ast(node->next);
+    }
+    else if (node->type == NODE_CALL)
+    {
+        if (node->func_name) {
+            free(node->func_name);
+        }
+        free_ast(node->next);
     }
     free(node);
 }
