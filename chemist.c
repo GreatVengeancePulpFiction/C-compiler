@@ -289,7 +289,7 @@ void add_variable(const char* name)
     current_scope->symbols = (Symbol*)realloc(current_scope->symbols, current_scope->symbol_count * sizeof(Symbol));
     current_scope->symbols[current_scope->symbol_count - 1].name = strdup(name);
     current_scope->stack_size += 8; // 8 bytes for int
-    current_scope->symbols[current_scope->symbol_count - 1].stack_offset = -current_scope->stack_size;
+    current_scope->symbols[current_scope->symbol_count - 1].stack_offset = current_scope->stack_size;
 }
 
 int get_variable_offset(const char* name)
@@ -380,7 +380,7 @@ void generate_code(Node* node)
                     else if (stmt->left->type == NODE_VAR_REF)
                     {
                         int offset = get_variable_offset(stmt->left->var_name);
-                        fprintf(output, "    mov rax, [rbp + %d]\n", offset);
+                        fprintf(output, "    mov rax, [rbp - %d]\n", offset);
                     }
                     else
                     {
@@ -409,13 +409,13 @@ void generate_code(Node* node)
                     if (stmt->right->type == NODE_NUMBER)
                     {
                         fprintf(output, "    mov rax, %d\n", stmt->right->value);
-                        fprintf(output, "    mov [rbp + %d], rax\n", offset);
+                        fprintf(output, "    mov [rbp - %d], rax\n", offset);
                     }
                     else if (stmt->right->type == NODE_VAR_REF)
                     {
                         int right_offset = get_variable_offset(stmt->right->var_name);
-                        fprintf(output, "    mov rax, [rbp + %d]\n", right_offset);
-                        fprintf(output, "    mov [rbp + %d], rax\n", offset);
+                        fprintf(output, "    mov rax, [rbp - %d]\n", right_offset);
+                        fprintf(output, "    mov [rbp - %d], rax\n", offset);
                     }
                     else if (stmt->right->type == NODE_CALL)
                     {
@@ -425,7 +425,7 @@ void generate_code(Node* node)
                             exit(1);
                         }
                         fprintf(output, "   call %s\n", stmt->right->func_name);
-                        fprintf(output, "   mov [rbp + %d], rax\n", offset);
+                        fprintf(output, "   mov [rbp - %d], rax\n", offset);
                     }
                     else
                     {

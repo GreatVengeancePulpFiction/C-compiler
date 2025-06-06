@@ -1,5 +1,7 @@
 int func() {
-    return 42;
+    int x;
+    x = 42;
+    return x;
 }
 
 int main() {
