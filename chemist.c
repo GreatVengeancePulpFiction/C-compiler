@@ -375,7 +375,7 @@ void generate_code(Node* node)
                             fprintf(stderr, "Error: Function call name is null in return\n");
                             exit(1);
                         }
-                        fprintf(output, "    call %s\n", stmt->left->func_name);
+                        fprintf(output, "   call %s\n", stmt->left->func_name);
                     }
                     else if (stmt->left->type == NODE_VAR_REF)
                     {
@@ -401,7 +401,7 @@ void generate_code(Node* node)
                         fprintf(stderr, "Error: Function call name is null\n");
                         exit(1);
                     }
-                    fprintf(output, "    call %s\n", stmt->func_name);
+                    fprintf(output, "   call %s\n", stmt->func_name);
                 }
                 else if (stmt->type == NODE_VAR_ASSIGN)
                 {
@@ -424,8 +424,8 @@ void generate_code(Node* node)
                             fprintf(stderr, "Error: Function call name is null in assignment\n");
                             exit(1);
                         }
-                        fprintf(output, "   call %s\n", stmt->right->func_name);
-                        fprintf(output, "   mov [rbp - %d], rax\n", offset);
+                        fprintf(output, "    call %s\n", stmt->right->func_name);
+                        fprintf(output, "    mov [rbp - %d], rax\n", offset);
                     }
                     else
                     {
